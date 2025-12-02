@@ -1,4 +1,4 @@
-name: Build Linux ARM64 (via Docker)
+name: Build Linux ARM64 (edition 2024 ready)
 
 on:
   workflow_dispatch:
@@ -11,27 +11,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Включаем поддержку запуска ARM64-контейнеров на x86_64 хосте
+      # Включаем эмуляцию ARM64 (один раз)
       - name: Enable ARM64 emulation
-        run: |
-          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+        run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      # Собираем в настоящем aarch64 окружении
-      - name: Build inside aarch64 Docker container
+      # Собираем в настоящем aarch64-контейнере с самой свежей версией Rust
+      - name: Build in ARM64 container (Rust latest)
         run: |
-          docker run --rm -v "$PWD":/build -w /build \
+          docker run --rm \
+            -v "$PWD":/build \
+            -w /build \
             --platform linux/arm64 \
-            rust:1.82-alpine \
+            rust:latest \
             sh -c "
-              apk add --no-cache musl-dev &&
+              rustc --version &&
+              cargo --version &&
+              apk add --no-cache musl-dev || true &&   # если вдруг alpine
               cargo build --release &&
               strip target/release/ccproxy &&
-              tar -czf /build/ccproxy-aarch64-linux.tar.gz -C target/release ccproxy &&
-              sha256sum /build/ccproxy-aarch64-linux.tar.gz > /build/ccproxy-aarch64-linux.tar.gz.sha256
+              tar -czf ccproxy-aarch64-linux.tar.gz -C target/release ccproxy &&
+              sha256sum ccproxy-aarch64-linux.tar.gz > ccproxy-aarch64-linux.tar.gz.sha256
             "
 
-      # Публикуем релиз (только если запустили по тегу)
-      - name: Create GitHub Release
+      # Публикуем релиз
+      - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
@@ -39,6 +42,6 @@ jobs:
             ccproxy-aarch64-linux.tar.gz
             ccproxy-aarch64-linux.tar.gz.sha256
           body: |
-            Linux aarch64 (ARM64) build
-            Built natively inside ARM64 container
+            Linux aarch64 (ARM64) build — built natively in ARM64 container
+            Rust: $(docker run --rm --platform linux/arm64 rust:latest rustc --version)
             SHA256: $(cut -d' ' -f1 ccproxy-aarch64-linux.tar.gz.sha256)
