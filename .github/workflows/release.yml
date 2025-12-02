@@ -1,59 +1,61 @@
 name: Build Linux ARM64
 
 on:
-  workflow_dispatch:      # запускаешь вручную
+  workflow_dispatch:
   push:
-    tags:
-      - 'v*'               # или автоматически по тегу
+    tags: [ 'v*' ]
 
 jobs:
-  build-arm64:
+  build-aarch64:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write     # нужен для создания релиза
-
     steps:
-      # 1. Чекаутим код
       - uses: actions/checkout@v4
 
-      # 2. Устанавливаем стабильный Rust + target для ARM64
+      # Устанавливаем Rust + target
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
 
-      # 3. Устанавливаем кросс-линкер (нужен для статической линковки или просто для работы)
-      - name: Install aarch64 cross-compiler
+      # Самое важное: используем zig как C-линкер (работает везде)
+      - name: Install zig (cross-linker)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ
+          echo "$PWD/zig-linux-x86_64-0.13.0" >> $GITHUB_PATH
 
-      # 4. Кэшируем cargo (очень ускоряет повторные запуски)
+      # Настраиваем cargo использовать zig вместо gcc/ld
+      - name: Configure cargo for zig
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "zig"
+          ar = "zig ar"
+          runner = "zig"
+          rustflags = ["-C", "link-arg=--ld-path=ld.lld"]
+          EOF
+
+      # Кэшируем cargo
       - uses: Swatinem/rust-cache@v2
 
-      # 5. Собираем релизный бинарник
-      - name: Build release binary
-        run: |
-          cargo build --release --target aarch64-unknown-linux-gnu
+      # Собираем!
+      - name: Build release
+        run: cargo build --release --target aarch64-unknown-linux-gnu
 
-      # 6. Упаковываем в tar.gz (стандарт для Linux)
-      - name: Package binary
+      # Упаковываем
+      - name: Package
         run: |
-          cp target/aarch64-unknown-linux-gnu/release/ccproxy .
-          tar -czf ccproxy-aarch64-linux.tar.gz ccproxy
+          strip target/aarch64-unknown-linux-gnu/release/ccproxy
+          tar -czf ccproxy-aarch64-linux.tar.gz -C target/aarch64-unknown-linux-gnu/release ccproxy
           sha256sum ccproxy-aarch64-linux.tar.gz > ccproxy-aarch64-linux.tar.gz.sha256
 
-      # 7. Создаём/обновляем GitHub Release и заливаем бинарник
-      - name: Create/Release GitHub Release
+      # Публикуем релиз
+      - name: Release
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             ccproxy-aarch64-linux.tar.gz
             ccproxy-aarch64-linux.tar.gz.sha256
-          tag_name: ${{ github.ref_name }}   # если запуск по тегу — использует его
-          name: ccproxy ${{ github.ref_name }}
           body: |
             Linux aarch64 (ARM64) build
-            SHA256: $(cat ccproxy-aarch64-linux.tar.gz.sha256)
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
+            SHA256: $(cut -d' ' -f1 ccproxy-aarch64-linux.tar.gz.sha256)
