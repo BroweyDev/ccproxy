@@ -1,0 +1,27 @@
+# .convco.yaml
+commit_types:
+  - feat
+  - fix
+  - docs
+  - style
+  - refactor
+  - perf
+  - test
+  - build
+  - ci
+  - chore
+  - revert
+
+changelog:
+  # Разрешаем chore(release) как релизные коммиты
+  release_commit_types:
+    - feat
+    - fix
+    - perf
+    - breaking
+
+  # Это позволяет git-cliff и convco понимать, что chore(release) — это релизный коммит
+  commit_parsers:
+    - { message: "^chore\\(release\\):", group: "RELEASE" }
+    - { message: "^chore\\(deps\\)", skip: true }
+    - { message: "^chore\\(ci\\)", skip: true }
