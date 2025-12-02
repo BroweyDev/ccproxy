@@ -1,227 +1,59 @@
-name: Release
+name: Build Linux ARM64
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:      # запускаешь вручную
+  push:
+    tags:
+      - 'v*'               # или автоматически по тегу
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - uses: cachix/install-nix-action@v18
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Check commits (Conventional Commits)
-        run: nix shell nixpkgs#convco -c convco check
-
-      - name: Get next version
-        id: version
-        run: echo "tag=$(nix shell nixpkgs#git-cliff -c git-cliff --bumped-version)" >> $GITHUB_OUTPUT
-
-      - name: Generate changelog
-        run: nix shell nixpkgs#git-cliff -c git-cliff -v -r ./ -t ${{ steps.version.outputs.tag }} > RELEASE_NOTES.md
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-notes
-          path: RELEASE_NOTES.md
-
-  commit_version_bump:
-    needs: [prepare]
+  build-arm64:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.get_sha.outputs.sha }}
+      contents: write     # нужен для создания релиза
+
     steps:
-      - uses: actions/checkout@v3
+      # 1. Чекаутим код
+      - uses: actions/checkout@v4
+
+      # 2. Устанавливаем стабильный Rust + target для ARM64
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          ref: ${{ github.ref_name }}
+          targets: aarch64-unknown-linux-gnu
 
-      - uses: cachix/install-nix-action@v18
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Update version in Cargo.toml
-        run: |
-          TAG=${{ needs.prepare.outputs.tag }}
-          VERSION=${TAG#v}
-          nix shell nixpkgs#cargo-edit -c cargo set-version $VERSION
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-
-      - name: Commit & push version bump + changelog
-        run: |
-          mv RELEASE_NOTES.md CHANGELOG.md
-          git add Cargo.toml Cargo.lock CHANGELOG.md
-          git commit -m "chore(release): ${{ needs.prepare.outputs.tag }}"
-          git push
-
-      - name: Get commit SHA
-        id: get_sha
-        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-  build:
-    needs: [prepare, commit_version_bump]
-    strategy:
-      matrix:
-        include:
-          # Linux x86_64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: ccproxy-x86_64-unknown-linux-gnu
-
-          # Linux aarch64 (ARM64)
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            name: ccproxy-aarch64-unknown-linux-gnu
-            cross: true
-
-          # macOS x86_64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            name: ccproxy-x86_64-apple-darwin
-
-          # macOS aarch64 (Apple Silicon)
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            name: ccproxy-aarch64-apple-darwin
-
-          # Windows x86_64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: ccproxy-x86_64-pc-windows-msvc.exe
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          ref: ${{ needs.commit_version_bump.outputs.sha }}
-
-      - name: Setup Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-          override: true
-
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.cross == true
+      # 3. Устанавливаем кросс-линкер (нужен для статической линковки или просто для работы)
+      - name: Install aarch64 cross-compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
+      # 4. Кэшируем cargo (очень ускоряет повторные запуски)
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package binary
-        shell: bash
+      # 5. Собираем релизный бинарник
+      - name: Build release binary
         run: |
-          BINARY_NAME="ccproxy"
-          EXT=""
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            BINARY_NAME="ccproxy.exe"
-            EXT=".exe"
-          fi
+          cargo build --release --target aarch64-unknown-linux-gnu
 
-          ARTIFACT_NAME="${{ matrix.name }}"
+      # 6. Упаковываем в tar.gz (стандарт для Linux)
+      - name: Package binary
+        run: |
+          cp target/aarch64-unknown-linux-gnu/release/ccproxy .
+          tar -czf ccproxy-aarch64-linux.tar.gz ccproxy
+          sha256sum ccproxy-aarch64-linux.tar.gz > ccproxy-aarch64-linux.tar.gz.sha256
 
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/$BINARY_NAME" "dist/$ARTIFACT_NAME$EXT"
-
-          cd dist
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a "../${ARTIFACT_NAME}.zip" "${ARTIFACT_NAME}$EXT"
-          else
-            tar -czvf "../${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}$EXT"
-          fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.*
-          if-no-files-found: error
-
-  publish_release:
-    needs: [prepare, build, commit_version_bump]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-
-      - name: Download all built binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: binaries
-
-      - name: Create GitHub Release
+      # 7. Создаём/обновляем GitHub Release и заливаем бинарник
+      - name: Create/Release GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: Release ${{ needs.prepare.outputs.tag }}
-          body_path: RELEASE_NOTES.md
+          files: |
+            ccproxy-aarch64-linux.tar.gz
+            ccproxy-aarch64-linux.tar.gz.sha256
+          tag_name: ${{ github.ref_name }}   # если запуск по тегу — использует его
+          name: ccproxy ${{ github.ref_name }}
+          body: |
+            Linux aarch64 (ARM64) build
+            SHA256: $(cat ccproxy-aarch64-linux.tar.gz.sha256)
           draft: false
           prerelease: false
-          files: |
-            binaries/*/*
-          target_commitish: ${{ needs.commit_version_bump.outputs.sha }}
-
-  publish_container:
-    needs: [prepare, publish_release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - uses: cachix/install-nix-action@v18
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & push multi-arch container
-        run: |
-          nix run .#container.copyToDockerDaemon
-
-          # Тегируем и пушим обе архитектуры
-          docker tag ccproxy:latest ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}
-          docker tag ccproxy:latest ghcr.io/${{ github.repository }}:latest
-
-          docker push ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}
-          docker push ghcr.io/${{ github.repository }}:latest
+          fail_on_unmatched_files: true
